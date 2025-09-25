@@ -13,12 +13,18 @@ typedef void(bestlineCompletionCallback)(const char *, int,
 typedef char *(bestlineHintsCallback)(const char *, const char **, const char **);
 typedef void(bestlineFreeHintsCallback)(void *);
 typedef unsigned(bestlineXlatCallback)(unsigned);
+typedef void(bestlineOnHistoryLoadedCallback(const char *, int));
+typedef void(bestlineHistoryCleanCallback(char **, unsigned));
+typedef void(bestlineHistoryRemoveCallback(const char *, int, char **, unsigned));
 
 void bestlineSetCompletionCallback(bestlineCompletionCallback *);
 void bestlineSetHintsCallback(bestlineHintsCallback *);
 void bestlineSetFreeHintsCallback(bestlineFreeHintsCallback *);
 void bestlineAddCompletion(bestlineCompletions *, const char *);
 void bestlineSetXlatCallback(bestlineXlatCallback *);
+void bestlineSetOnHistoryLoadedCallback(bestlineOnHistoryLoadedCallback *);
+void bestlineSetOnHistoryCleanCallback(bestlineHistoryCleanCallback *);
+void bestlineSetOnHistoryRemoveCallback(bestlineHistoryRemoveCallback *);
 
 char *bestline(const char *);
 char *bestlineInit(const char *, const char *);
@@ -28,6 +34,12 @@ char *bestlineWithHistory(const char *, const char *);
 int bestlineHistoryAdd(const char *);
 int bestlineHistoryLoad(const char *);
 int bestlineHistorySave(const char *);
+int bestlineHistoryPrint(int fd);
+unsigned bestlineHistoryCount();
+void bestlineHistoryCountDecrement();
+char **bestlineHistory();
+int bestlineHistoryClean();
+int bestlineHistoryRemove(const char *, int);
 void bestlineBalanceMode(char);
 void bestlineEmacsMode(char);
 void bestlineClearScreen(int);
@@ -53,3 +65,4 @@ long bestlineReadCharacter(int, char *, unsigned long);
 #ifdef __cplusplus
 }
 #endif
+
