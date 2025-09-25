@@ -3774,8 +3774,7 @@ int bestlineHistoryLoad(const char *filename) {
     return rc;
 }
 
-int bestlineHistoryPrint(int fd)
-{
+int bestlineHistoryPrint(int fd) {
     for (unsigned i = 0; i < historylen; ++i) {
         bestlineWriteChars(fd, bl_history[i]);
         bestlineWrite(fd, "\n", 1);
@@ -3783,30 +3782,25 @@ int bestlineHistoryPrint(int fd)
     return 0;
 }
 
-unsigned bestlineHistoryCount()
-{
+unsigned bestlineHistoryCount() {
     return historylen;
 }
 
-void bestlineHistoryCountDecrement()
-{
+void bestlineHistoryCountDecrement() {
     --historylen;
 }
 
-char **bestlineHistory()
-{
+char **bestlineHistory() {
     return bl_history;
 }
 
-int bestlineHistoryClean()
-{
+int bestlineHistoryClean() {
     if (historyCleanCallback)
         historyCleanCallback(bl_history, historylen);
     return 0;
 }
 
-int bestlineHistoryRemove(const char * rm, int n)
-{
+int bestlineHistoryRemove(const char * rm, int n) {
     if (historyRemoveCallback)
         historyRemoveCallback(rm, n, bl_history, historylen);
     return 0;
