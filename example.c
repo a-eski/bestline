@@ -38,7 +38,7 @@ char *hints(const char *buf, const char **ansi1, const char **ansi2) {
     return NULL;
 }
 
-int main(int argc, char **argv) {
+int main() {
     char *line;
 
     /* Set the completion callback. This will be called every time the

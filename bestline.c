@@ -131,18 +131,22 @@
 │ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.         │
 │                                                                              │
 ╚─────────────────────────────────────────────────────────────────────────────*/
-#include "bestline.h"
 
+#ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 1 /* so GCC builds in ANSI mode */
+#endif
+#ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700 /* so GCC builds in ANSI mode */
+#endif
+#ifndef _DARWIN_C_SOURCE
 #define _DARWIN_C_SOURCE 1 /* so SIGWINCH / IUTF8 on XNU */
+#endif
+
 #include <assert.h>
-#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
-#include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -154,6 +158,9 @@
 #include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
+
+#include "bestline.h"
+
 #ifndef SIGWINCH
 #define SIGWINCH 28 /* GNU/Systemd + XNU + FreeBSD + NetBSD + OpenBSD */
 #endif
@@ -161,8 +168,12 @@
 #define IUTF8 0
 #endif
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsign-conversion"
+
 __asm__(".ident\t\"\\n\\n\
 Bestline (BSD-2)\\n\
+Copyright 2025-2025 Alex Eski <alexeski@gmail.com>\\n\
 Copyright 2018-2020 Justine Tunney <jtunney@gmail.com>\\n\
 Copyright 2010-2016 Salvatore Sanfilippo <antirez@gmail.com>\\n\
 Copyright 2010-2013 Pieter Noordhuis <pcnoordhuis@gmail.com>\"");
@@ -246,11 +257,14 @@ static struct bestlineRing ring;
 static struct sigaction orig_cont;
 static struct sigaction orig_winch;
 static struct termios orig_termios;
-static char *history[BESTLINE_MAX_HISTORY];
+static char *bl_history[BESTLINE_MAX_HISTORY];
 static bestlineXlatCallback *xlatCallback;
 static bestlineHintsCallback *hintsCallback;
 static bestlineFreeHintsCallback *freeHintsCallback;
 static bestlineCompletionCallback *completionCallback;
+static bestlineOnHistoryLoadedCallback *onHistoryLoadedCallback;
+static bestlineHistoryCleanCallback *historyCleanCallback;
+static bestlineHistoryRemoveCallback *historyRemoveCallback;
 
 static void bestlineAtExit(void);
 static void bestlineRefreshLine(struct bestlineState *);
@@ -539,7 +553,7 @@ int bestlineCharacterWidth(int c) {
  * other things like blocks and emoji (So).
  */
 char bestlineIsSeparator(unsigned c) {
-    int m, l, r, n;
+    int l, r, n;
     if (c < 0200) {
         return !(('0' <= c && c <= '9') || ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z'));
     }
@@ -1503,15 +1517,15 @@ static void abInit(struct abuf *a) {
 }
 
 static char abGrow(struct abuf *a, int need) {
-    int cap;
+    int c;
     char *b;
-    cap = a->cap;
+    c = a->cap;
     do
-        cap += cap / 2;
-    while (cap < need);
-    if (!(b = (char *)realloc(a->b, cap * sizeof(*a->b))))
+        c += c / 2;
+    while (c < need);
+    if (!(b = (char *)realloc(a->b, c * sizeof(*a->b))))
         return 0;
-    a->cap = cap;
+    a->cap = c;
     a->b = b;
     return 1;
 }
@@ -2106,7 +2120,7 @@ void bestlineDisableRawMode(void) {
     }
 }
 
-static int bestlineWrite(int fd, const void *p, size_t n) {
+int bestlineWrite(int fd, const void *p, size_t n) {
     ssize_t rc;
     size_t wrote;
     do {
@@ -2144,7 +2158,7 @@ static int bestlineWrite(int fd, const void *p, size_t n) {
     return 0;
 }
 
-static int bestlineWriteStr(int fd, const char *p) {
+int bestlineWriteChars(int fd, const char *p) {
     return bestlineWrite(fd, p, strlen(p));
 }
 
@@ -2206,7 +2220,7 @@ static struct winsize GetTerminalSize(struct winsize ws, int ifd, int ofd) {
         ws.ws_col = x;
     }
     if (((!ws.ws_col || !ws.ws_row) && bestlineRead(ifd, 0, 0, 0) != -1 &&
-         bestlineWriteStr(ofd, "\0337" /* save position */
+         bestlineWriteChars(ofd, "\0337" /* save position */
                                "\033[9979;9979H" /* move cursor to bottom right corner */
                                "\033[6n" /* report position */
                                "\0338") != -1 && /* restore position */
@@ -2227,12 +2241,8 @@ static struct winsize GetTerminalSize(struct winsize ws, int ifd, int ofd) {
 
 /* Clear the screen. Used to handle ctrl+l */
 void bestlineClearScreen(int fd) {
-    bestlineWriteStr(fd, "\033[H" /* move cursor to top left corner */
+    bestlineWriteChars(fd, "\033[H" /* move cursor to top left corner */
                          "\033[2J"); /* erase display */
-}
-
-static void bestlineBeep(void) {
-    /* THE TERMINAL BELL IS DEAD - HISTORY HAS KILLED IT */
 }
 
 static char bestlineGrow(struct bestlineState *ls, size_t n) {
@@ -2265,9 +2275,7 @@ static ssize_t bestlineCompleteLine(struct bestlineState *ls, char *seq, int siz
     nread = 0;
     memset(&lc, 0, sizeof(lc));
     completionCallback(ls->buf, ls->pos, &lc);
-    if (!lc.len) {
-        bestlineBeep();
-    } else {
+    if (lc.len) {
         i = 0;
         stop = 0;
         original = *ls;
@@ -2296,9 +2304,6 @@ static ssize_t bestlineCompleteLine(struct bestlineState *ls, char *seq, int siz
             switch (seq[0]) {
             case '\t':
                 i = (i + 1) % (lc.len + 1);
-                if (i == lc.len) {
-                    bestlineBeep();
-                }
                 break;
             default:
                 if (i < lc.len) {
@@ -2326,13 +2331,13 @@ static void bestlineEditHistoryGoto(struct bestlineState *l, unsigned i) {
     if (i > historylen - 1)
         return;
     i = Max(Min(i, historylen - 1), 0);
-    free(history[historylen - 1 - l->hindex]);
-    history[historylen - 1 - l->hindex] = strdup(l->buf);
+    free(bl_history[historylen - 1 - l->hindex]);
+    bl_history[historylen - 1 - l->hindex] = strdup(l->buf);
     l->hindex = i;
-    n = strlen(history[historylen - 1 - l->hindex]);
+    n = strlen(bl_history[historylen - 1 - l->hindex]);
     bestlineGrow(l, n + 1);
     n = Min(n, l->buflen - 1);
-    memcpy(l->buf, history[historylen - 1 - l->hindex], n);
+    memcpy(l->buf, bl_history[historylen - 1 - l->hindex], n);
     l->buf[n] = 0;
     l->len = l->pos = n;
     bestlineRefreshLine(l);
@@ -2389,7 +2394,7 @@ static int bestlineSearch(struct bestlineState *l, char *seq, int size) {
                     --j;
                 } else if (i + 1 < historylen) {
                     ++i;
-                    j = strlen(history[historylen - 1 - i]);
+                    j = strlen(bl_history[historylen - 1 - i]);
                 }
             } else if (seq[0] == Ctrl('G')) {
                 bestlineEditHistoryGoto(l, oldindex);
@@ -2407,7 +2412,7 @@ static int bestlineSearch(struct bestlineState *l, char *seq, int size) {
         }
         isstale = 0;
         while (i < historylen) {
-            p = history[historylen - 1 - i];
+            p = bl_history[historylen - 1 - i];
             k = strlen(p);
             if (!isstale) {
                 j = Min(k, j + ab.len);
@@ -3382,7 +3387,7 @@ static ssize_t bestlineEdit(int stdin_fd, int stdout_fd, const char *prompt, con
     l.ws = GetTerminalSize(l.ws, l.ifd, l.ofd);
     abInit(&l.full);
     bestlineHistoryAdd("");
-    bestlineWriteStr(l.ofd, promptnotnull);
+    bestlineWriteChars(l.ofd, promptnotnull);
     init = init ? init : "";
     bestlineEditInsert(&l, init, strlen(init));
     while (1) {
@@ -3408,8 +3413,8 @@ static ssize_t bestlineEdit(int stdin_fd, int stdout_fd, const char *prompt, con
             seq[1] = 0;
         } else {
             if (historylen) {
-                free(history[--historylen]);
-                history[historylen] = 0;
+                free(bl_history[--historylen]);
+                bl_history[historylen] = 0;
             }
             free(l.buf);
             abFree(&l.full);
@@ -3461,15 +3466,15 @@ static ssize_t bestlineEdit(int stdin_fd, int stdout_fd, const char *prompt, con
                 bestlineEditDelete(&l);
             } else {
                 if (historylen) {
-                    free(history[--historylen]);
-                    history[historylen] = 0;
+                    free(bl_history[--historylen]);
+                    bl_history[historylen] = 0;
                 }
                 free(l.buf);
                 abFree(&l.full);
                 return -1;
             }
             break;
-        case '\n':
+        case '\n': {
             l.final = 1;
             bestlineEditEnd(&l);
             bestlineRefreshLineForce(&l);
@@ -3479,15 +3484,16 @@ static ssize_t bestlineEdit(int stdin_fd, int stdout_fd, const char *prompt, con
             abAppends(&l.full, "\n");
             l.len = 0;
             l.pos = 0;
-            bestlineWriteStr(stdout_fd, "\r\n");
+            bestlineWriteChars(stdout_fd, "\r\n");
             bestlineRefreshLineForce(&l);
             break;
+        }
         case '\r': {
             char is_finished = 1;
             char needs_strip = 0;
             if (historylen) {
-                free(history[--historylen]);
-                history[historylen] = 0;
+                free(bl_history[--historylen]);
+                bl_history[historylen] = 0;
             }
             l.final = 1;
             bestlineEditEnd(&l);
@@ -3519,7 +3525,7 @@ static ssize_t bestlineEdit(int stdin_fd, int stdout_fd, const char *prompt, con
                 abAppends(&l.full, "\n");
                 l.len = 0;
                 l.pos = 0;
-                bestlineWriteStr(stdout_fd, "\r\n");
+                bestlineWriteChars(stdout_fd, "\r\n");
                 bestlineRefreshLineForce(&l);
             }
             break;
@@ -3652,9 +3658,9 @@ void bestlineFree(void *ptr) {
 void bestlineHistoryFree(void) {
     size_t i;
     for (i = 0; i < BESTLINE_MAX_HISTORY; i++) {
-        if (history[i]) {
-            free(history[i]);
-            history[i] = 0;
+        if (bl_history[i]) {
+            free(bl_history[i]);
+            bl_history[i] = 0;
         }
     }
     historylen = 0;
@@ -3670,16 +3676,16 @@ int bestlineHistoryAdd(const char *line) {
     char *linecopy;
     if (!BESTLINE_MAX_HISTORY)
         return 0;
-    if (historylen && !strcmp(history[historylen - 1], line))
+    if (historylen && !strcmp(bl_history[historylen - 1], line))
         return 0;
     if (!(linecopy = strdup(line)))
         return 0;
     if (historylen == BESTLINE_MAX_HISTORY) {
-        free(history[0]);
-        memmove(history, history + 1, sizeof(char *) * (BESTLINE_MAX_HISTORY - 1));
+        free(bl_history[0]);
+        memmove(bl_history, bl_history + 1, sizeof(char *) * (BESTLINE_MAX_HISTORY - 1));
         historylen--;
     }
-    history[historylen++] = linecopy;
+    bl_history[historylen++] = linecopy;
     return 1;
 }
 
@@ -3699,7 +3705,7 @@ int bestlineHistorySave(const char *filename) {
         return -1;
     chmod(filename, S_IRUSR | S_IWUSR);
     for (j = 0; j < historylen; j++) {
-        fputs(history[j], fp);
+        fputs(bl_history[j], fp);
         fputc('\n', fp);
     }
     fclose(fp);
@@ -3725,6 +3731,7 @@ int bestlineHistoryLoad(const char *filename) {
         return 0;
     if (!(h = (char **)calloc(2 * BESTLINE_MAX_HISTORY, sizeof(char *))))
         return -1;
+    assert(filename);
     if ((fd = open(filename, O_RDONLY)) != -1) {
         if ((n = GetFdSize(fd))) {
             if ((m = (char *)mmap(0, n, PROT_READ, MAP_SHARED, fd, 0)) != MAP_FAILED) {
@@ -3746,7 +3753,9 @@ int bestlineHistoryLoad(const char *filename) {
                     if (h[(k = (i + j) % BESTLINE_MAX_HISTORY) * 2]) {
                         if ((s = (char *)malloc((t = h[k * 2 + 1] - h[k * 2]) + 1))) {
                             memcpy(s, h[k * 2], t), s[t] = 0;
-                            history[historylen++] = s;
+                            if (onHistoryLoadedCallback)
+                                onHistoryLoadedCallback(s, t + 1);
+                            bl_history[historylen++] = s;
                         }
                     }
                 }
@@ -3763,6 +3772,38 @@ int bestlineHistoryLoad(const char *filename) {
     }
     free(h);
     return rc;
+}
+
+int bestlineHistoryPrint(int fd) {
+    for (unsigned i = 0; i < historylen; ++i) {
+        bestlineWriteChars(fd, bl_history[i]);
+        bestlineWrite(fd, "\n", 1);
+    }
+    return 0;
+}
+
+unsigned bestlineHistoryCount() {
+    return historylen;
+}
+
+void bestlineHistoryCountDecrement() {
+    --historylen;
+}
+
+char **bestlineHistory() {
+    return bl_history;
+}
+
+int bestlineHistoryClean() {
+    if (historyCleanCallback)
+        historyCleanCallback(bl_history, historylen);
+    return 0;
+}
+
+int bestlineHistoryRemove(const char * rm, int n) {
+    if (historyRemoveCallback)
+        historyRemoveCallback(rm, n, bl_history, historylen);
+    return 0;
 }
 
 /**
@@ -3785,9 +3826,9 @@ char *bestlineRawInit(const char *prompt, const char *init, int infd, int outfd)
     sa->sa_handler = bestlineOnInt;
     sigaction(SIGINT, sa, sa + 1);
     sigaction(SIGQUIT, sa, sa + 2);
-    bestlineWriteStr(outfd, "\033[?2004h"); // enable bracketed paste mode
+    bestlineWriteChars(outfd, "\033[?2004h"); // enable bracketed paste mode
     rc = bestlineEdit(infd, outfd, prompt, init, &buf);
-    bestlineWriteStr(outfd, "\033[?2004l"); // disable bracketed paste mode
+    bestlineWriteChars(outfd, "\033[?2004l"); // disable bracketed paste mode
     bestlineDisableRawMode();
     sigaction(SIGQUIT, sa + 2, 0);
     sigaction(SIGINT, sa + 1, 0);
@@ -3798,7 +3839,7 @@ char *bestlineRawInit(const char *prompt, const char *init, int infd, int outfd)
         errno = EINTR;
         rc = -1;
     }
-    bestlineWriteStr(outfd, "\r\n");
+    bestlineWriteChars(outfd, "\r\n");
     if (rc != -1) {
         return buf;
     } else {
@@ -3960,6 +4001,20 @@ void bestlineSetXlatCallback(bestlineXlatCallback *fn) {
     xlatCallback = fn;
 }
 
+void bestlineSetOnHistoryLoadedCallback(bestlineOnHistoryLoadedCallback *fn) {
+    onHistoryLoadedCallback = fn;
+}
+
+
+void bestlineSetOnHistoryCleanCallback(bestlineHistoryCleanCallback *fn) {
+    historyCleanCallback = fn;
+}
+
+
+void bestlineSetOnHistoryRemoveCallback(bestlineHistoryRemoveCallback *fn) {
+    historyRemoveCallback = fn;
+}
+
 /**
  * Adds completion.
  *
@@ -4090,3 +4145,6 @@ void bestlineUserIO(int (*userReadFn)(int, void *, int), int (*userWriteFn)(int,
     else
         _MyPoll = MyPoll;
 }
+
+#pragma GCC diagnostic pop
+
